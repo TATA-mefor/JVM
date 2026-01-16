@@ -1,0 +1,93 @@
+这段内容来自《深入理解Java虚拟机（第3版）》的 **2.4 实战：OutOfMemoryError异常** 章节。这一节非常重要，因为它通过代码实战的方式，验证了 Java 虚拟机规范中各个内存区域的存储内容，并展示了在实际开发中可能遇到的各种内存溢出（OOM）场景。
+
+作者周志明在书中通过 4 个具体的实验场景，讲解了不同区域发生 OOM 的原因、表现形式以及排查思路。
+
+### 1. Java 堆溢出 (Java Heap Overflow)
+
+这是实际应用中最常见的 OOM 异常。
+
+* **原因**：Java 堆用于存储对象实例。如果不断创建对象，并且保证 GC Roots 到对象之间有可达路径（避免被 GC 回收），当对象数量达到最大堆容量限制后，就会产生 OOM。
+* **异常信息**：`java.lang.OutOfMemoryError: Java heap space`
+* **实验代码逻辑**：
+* 使用一个 `while(true)` 循环不断向 `List` 中添加对象。
+
+
+* **JVM 参数**：
+* `-Xms20m -Xmx20m`：将堆的最小值和最大值设为一样，避免自动扩展。
+* `-XX:+HeapDumpOnOutOfMemoryError`：让虚拟机在出现 OOM 时 Dump 出当前的内存堆转储快照，以便事后分析。
+
+
+* **排查思路**：
+* 使用内存分析工具（如 Eclipse Memory Analyzer）分析 Dump 文件。
+* **区分内存泄漏 (Memory Leak) 与内存溢出 (Memory Overflow)**：
+* **内存泄漏**：对象是无用的，但因为引用链导致无法回收。需查看泄漏对象到 GC Roots 的引用链。
+* **内存溢出**：对象确实都必须存活，但内存不足。需检查 JVM 参数 `-Xmx` 是否过小，或检查代码是否存在对象生命周期过长、存储结构设计不合理等情况。
+
+
+
+
+
+### 2. 虚拟机栈和本地方法栈溢出
+
+HotSpot 虚拟机不区分虚拟机栈和本地方法栈，栈容量只由 `-Xss` 参数设定。这里有两种异常情况：
+
+* **情况一：StackOverflowError**
+* **原因**：线程请求的栈深度大于虚拟机允许的最大深度（通常是递归调用过深）。
+* **实验**：无论是减少栈容量（如 `-Xss128k`）还是定义大量本地变量增大栈帧，在单线程下抛出的都是 `StackOverflowError`。
+
+
+* **情况二：OutOfMemoryError**
+* **原因**：在创建线程时，如果无法申请到足够的内存来分配栈空间。
+* **多线程导致的 OOM**：操作系统分配给每个进程的内存是有限的（如 32 位 Windows 限制为 2GB）。
+* 公式：`线程数 * 每个线程的栈容量 = 剩余内存`。
+* **剩余内存** = 物理内存 - 最大堆 (`-Xmx`) - 最大方法区 (`-MaxPermSize` 或 `-MaxMetaspaceSize`)。
+* **结论**：给每个线程分配的栈内存 (`-Xss`) 越大，可建立的线程数量反而越少，越容易产生 OOM。
+
+
+* **异常信息**：`java.lang.OutOfMemoryError: unable to create native thread`。
+* **排查**：如果是建立过多线程导致的，在不能减少线程数的情况下，可以通过**减少最大堆**和**减少栈容量**来换取更多的线程。
+
+
+
+### 3. 方法区和运行时常量池溢出
+
+这部分内容涉及 JDK 版本变迁带来的巨大差异（去永久代，引入元空间）。
+
+* **运行时常量池溢出**：
+* **场景**：使用 `String.intern()` 产生大量字符串常量。
+* **JDK 6**：常量池在永久代，限制 `-XX:MaxPermSize` 会导致 `java.lang.OutOfMemoryError: PermGen space`。
+* **JDK 7+**：字符串常量池移到了 Java 堆中。限制永久代或元空间大小不会导致此 OOM，而是会报 `Java heap space`。
+
+
+* **方法区溢出**：
+* **原因**：程序在运行时生成了大量的动态类（Class 对象），填满了方法区。
+* **场景**：使用 CGLib 动态生成类、JSP、OSGi 等。
+* **异常信息**：
+* JDK 7 及之前：`java.lang.OutOfMemoryError: PermGen space`。
+* JDK 8 及之后：`java.lang.OutOfMemoryError: Metaspace`。
+
+
+* **JVM 参数**：
+* JDK 8+ 使用 `-XX:MaxMetaspaceSize` 限制元空间大小，`-XX:MetaspaceSize` 指定初始大小。
+
+
+
+
+
+### 4. 本机直接内存溢出 (Direct Memory Overflow)
+
+* **原因**：使用了 NIO 的 `DirectByteBuffer`，或者直接使用 `Unsafe.allocateMemory` 分配直接内存。
+* **特点**：
+* DirectMemory 容量可通过 `-XX:MaxDirectMemorySize` 指定，默认与 Java 堆最大值 (`-Xmx`) 一致。
+* 这种 OOM 的一个明显特征是：Heap Dump 文件通常很小，甚至看不出明显异常。如果你发现 Dump 文件很小但程序抛出 OOM，且使用了 NIO，应检查直接内存。
+
+
+* **异常信息**：`java.lang.OutOfMemoryError`（后面可能没有详细后缀，或者是 crash）。
+
+### 总结建议
+
+在工作中遇到 OOM 时：
+
+1. **看异常信息**：是 `Java heap space`（堆）、`StackOverflowError`（栈深度）、`unable to create native thread`（栈数量/系统资源）、`PermGen/Metaspace`（方法区）还是单纯的 `OutOfMemoryError`（可能直接内存）。
+2. **使用工具**：利用 `-XX:+HeapDumpOnOutOfMemoryError` 自动保存现场，使用 MAT 分析堆快照。
+3. **调整参数**：根据分析结果调整 `-Xmx`, `-Xss`, `-XX:MaxMetaspaceSize` 等参数。
